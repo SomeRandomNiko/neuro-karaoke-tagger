@@ -9,7 +9,7 @@ import shutil
 import sqlite3
 
 from mutagen.mp3 import MP3
-from mutagen.id3 import ID3, TIT2, TPE1, TPE2, TALB, TRCK, TPOS, TDRC, APIC
+from mutagen.id3 import ID3, TIT2, TPE1, TPE2, TALB, TRCK, TPOS, TDRC
 
 INPUT_DIR = "/input"
 OUTPUT_DIR = "/output"
@@ -18,6 +18,10 @@ ALBUM_ARTIST = "QueenPB & Vedal987"
 FOLDER_RE = re.compile(
     r"^DISC \d+ - (.+) \(\d{4}-\d{2}-\d{2} - (?:\d{4}-\d{2}-\d{2}|Present)\)$"
 )
+
+# Navidrome cover art lookup: basenames in priority order, valid image extensions
+COVER_BASENAMES = ("cover", "folder", "front")
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif")
 
 log = logging.getLogger("tagger")
 
@@ -67,6 +71,26 @@ def get_all_paths(conn):
 def parse_album_name(folder_name):
     m = FOLDER_RE.match(folder_name)
     return m.group(1) if m else None
+
+
+# ---------------------------------------------------------------------------
+# Cover art finder (Navidrome-compatible)
+# ---------------------------------------------------------------------------
+
+def find_cover_image(folder_path):
+    """Find the best cover image in a folder using Navidrome's priority order."""
+    try:
+        files = os.listdir(folder_path)
+    except OSError:
+        return None
+
+    files_lower = {f.lower(): f for f in files}
+    for basename in COVER_BASENAMES:
+        for ext in IMAGE_EXTENSIONS:
+            key = basename + ext
+            if key in files_lower:
+                return files_lower[key]
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +162,7 @@ def extract_metadata(filepath):
 # ID3v2.4 tag writer
 # ---------------------------------------------------------------------------
 
-def apply_tags(filepath, metadata, album_name, cover_bytes):
+def apply_tags(filepath, metadata, album_name):
     # Strip all existing tags from the file
     audio = MP3(filepath)
     audio.delete()
@@ -158,15 +182,6 @@ def apply_tags(filepath, metadata, album_name, cover_bytes):
     tags.add(TPOS(encoding=3, text=[str(metadata["disc_number"])]))
     tags.add(TDRC(encoding=3, text=[metadata["date"]]))
 
-    if cover_bytes:
-        tags.add(APIC(
-            encoding=3,
-            mime="image/png",
-            type=3,
-            desc="Front Cover",
-            data=cover_bytes,
-        ))
-
     tags.save(filepath, v2_version=4)
 
 
@@ -180,7 +195,6 @@ def sync():
 
     stats = {"processed": 0, "skipped": 0, "deleted": 0, "errors": 0}
     seen_paths = set()
-    folders_with_writes = set()
 
     # --- Step A: scan & validate folders ---
     try:
@@ -204,13 +218,6 @@ def sync():
     for folder_name, album_name in album_map.items():
         input_folder = os.path.join(INPUT_DIR, folder_name)
         output_folder = os.path.join(OUTPUT_DIR, folder_name)
-
-        # Read cover art once per folder
-        cover_path = os.path.join(input_folder, "cover.png")
-        cover_bytes = None
-        if os.path.isfile(cover_path):
-            with open(cover_path, "rb") as f:
-                cover_bytes = f.read()
 
         for fname in sorted(os.listdir(input_folder)):
             if not fname.lower().endswith(".mp3"):
@@ -242,34 +249,46 @@ def sync():
                 log.warning("No metadata for %s, copied without tags", rel_path)
                 stats["errors"] += 1
                 upsert_record(conn, rel_path, st.st_mtime, st.st_size)
-                folders_with_writes.add(folder_name)
                 continue
 
             # Apply clean ID3v2.4 tags
             try:
-                apply_tags(output_path, metadata, album_name, cover_bytes)
+                apply_tags(output_path, metadata, album_name)
             except Exception as e:
                 log.warning("Failed to apply tags to %s: %s", rel_path, e)
                 stats["errors"] += 1
                 upsert_record(conn, rel_path, st.st_mtime, st.st_size)
-                folders_with_writes.add(folder_name)
                 continue
 
             upsert_record(conn, rel_path, st.st_mtime, st.st_size)
-            folders_with_writes.add(folder_name)
             stats["processed"] += 1
             log.info("Processed: %s", rel_path)
 
-    # --- Step C: copy cover.png for folders that had writes ---
-    for folder_name in folders_with_writes:
-        src = os.path.join(INPUT_DIR, folder_name, "cover.png")
-        dst = os.path.join(OUTPUT_DIR, folder_name, "cover.png")
-        if os.path.isfile(src):
-            try:
-                shutil.copy2(src, dst)
-                log.info("Copied cover art: %s", folder_name)
-            except OSError as e:
-                log.warning("Failed to copy cover.png for %s: %s", folder_name, e)
+    # --- Step C: copy cover art (with change tracking) ---
+    for folder_name in album_map:
+        input_folder = os.path.join(INPUT_DIR, folder_name)
+        output_folder = os.path.join(OUTPUT_DIR, folder_name)
+
+        cover_fname = find_cover_image(input_folder)
+        if cover_fname is None:
+            continue
+
+        rel_path = os.path.join(folder_name, cover_fname)
+        input_path = os.path.join(input_folder, cover_fname)
+        seen_paths.add(rel_path)
+
+        st = os.stat(input_path)
+        record = get_record(conn, rel_path)
+        if record and record[0] == st.st_mtime and record[1] == st.st_size:
+            continue
+
+        try:
+            os.makedirs(output_folder, exist_ok=True)
+            shutil.copy2(input_path, os.path.join(output_folder, cover_fname))
+            upsert_record(conn, rel_path, st.st_mtime, st.st_size)
+            log.info("Copied cover art: %s", rel_path)
+        except OSError as e:
+            log.warning("Failed to copy cover art %s: %s", rel_path, e)
 
     # --- Step D: purge deletions ---
     orphans = get_all_paths(conn) - seen_paths
