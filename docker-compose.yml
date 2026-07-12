@@ -1,0 +1,7 @@
+services:
+  tagger:
+    build: .
+    volumes:
+      - ./test/input:/input:ro
+      - ./test/output:/output
+      - ./test/data:/data
