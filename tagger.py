@@ -120,8 +120,8 @@ def extract_metadata(filepath):
         track_total = None
 
     # Split and deduplicate artists, preserving order
-    artists = data["Artist"].split(" & ")
-    cover_artists = data["CoverArtist"].split(" & ")
+    artists = re.split(r" & |, ", data["Artist"])
+    cover_artists = re.split(r" & |, ", data["CoverArtist"])
     all_artists = list(dict.fromkeys(artists + cover_artists))
 
     return {
