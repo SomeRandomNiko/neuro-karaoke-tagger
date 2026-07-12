@@ -108,14 +108,30 @@ def extract_metadata(filepath):
         log.warning("No ID3 tags in %s", filepath)
         return None
 
-    # Find COMM frame with language code "ved"
+    # Find COMM frame with language code "ved", fall back to "eng"
     json_str = None
+    fallback_used = False
     for key in audio.tags:
         if key.startswith("COMM:"):
             frame = audio.tags[key]
             if frame.lang == "ved":
                 json_str = frame.text[0] if isinstance(frame.text, list) else frame.text
                 break
+
+    if json_str is None:
+        # Fallback: check "eng" COMM frames for valid JSON
+        for key in audio.tags:
+            if key.startswith("COMM:"):
+                frame = audio.tags[key]
+                if frame.lang == "eng":
+                    texts = frame.text if isinstance(frame.text, list) else [frame.text]
+                    for t in texts:
+                        if t.lstrip().startswith("{"):
+                            json_str = t
+                            fallback_used = True
+                            break
+                if json_str:
+                    break
 
     if json_str is None:
         log.warning("No COMM frame with lang 'ved' in %s", filepath)
@@ -126,6 +142,9 @@ def extract_metadata(filepath):
     except (json.JSONDecodeError, TypeError) as e:
         log.warning("Invalid JSON in COMM frame of %s: %s", filepath, e)
         return None
+
+    if fallback_used:
+        log.warning("Metadata found in 'eng' COMM frame (expected 'ved'): %s", filepath)
 
     required = ("Title", "Artist", "CoverArtist", "Date", "Track", "Discnumber")
     missing = [f for f in required if f not in data]
