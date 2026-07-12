@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Neuro Karaoke Tagger - Incremental MP3 metadata pipeline for Navidrome."""
 
+import argparse
 import json
 import logging
 import os
@@ -208,9 +209,12 @@ def apply_tags(filepath, metadata, album_name):
 # Sync engine
 # ---------------------------------------------------------------------------
 
-def sync():
+def sync(force=False):
     conn = sqlite3.connect(DB_PATH)
     init_db(conn)
+
+    if force:
+        log.info("Force mode: reprocessing all files")
 
     stats = {"processed": 0, "skipped": 0, "deleted": 0, "errors": 0}
     seen_paths = set()
@@ -248,10 +252,11 @@ def sync():
             seen_paths.add(rel_path)
 
             st = os.stat(input_path)
-            record = get_record(conn, rel_path)
-            if record and record[0] == st.st_mtime and record[1] == st.st_size:
-                stats["skipped"] += 1
-                continue
+            if not force:
+                record = get_record(conn, rel_path)
+                if record and record[0] == st.st_mtime and record[1] == st.st_size:
+                    stats["skipped"] += 1
+                    continue
 
             # Copy raw file to output
             try:
@@ -297,9 +302,10 @@ def sync():
         seen_paths.add(rel_path)
 
         st = os.stat(input_path)
-        record = get_record(conn, rel_path)
-        if record and record[0] == st.st_mtime and record[1] == st.st_size:
-            continue
+        if not force:
+            record = get_record(conn, rel_path)
+            if record and record[0] == st.st_mtime and record[1] == st.st_size:
+                continue
 
         try:
             os.makedirs(output_folder, exist_ok=True)
@@ -340,13 +346,18 @@ def sync():
 # ---------------------------------------------------------------------------
 
 def main():
+    parser = argparse.ArgumentParser(description="Neuro Karaoke Tagger")
+    parser.add_argument("--force", action="store_true",
+                        help="Ignore state database and reprocess all files")
+    args = parser.parse_args()
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     log.info("Starting neuro-karaoke-tagger")
-    stats = sync()
+    stats = sync(force=args.force)
     log.info(
         "Done: %d processed, %d skipped, %d deleted, %d errors",
         stats["processed"],
